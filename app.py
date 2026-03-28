@@ -1075,6 +1075,26 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             display: grid;
             gap: 8px;
             margin-bottom: 16px;
+            max-height: 320px;
+            overflow-y: auto;
+            padding-right: 4px;
+        }
+
+        .format-grid::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        .format-grid::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        .format-grid::-webkit-scrollbar-thumb {
+            background: var(--border);
+            border-radius: 3px;
+        }
+
+        .format-grid::-webkit-scrollbar-thumb:hover {
+            background: var(--text3);
         }
 
         .format-option {
@@ -1158,6 +1178,14 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         .download-actions {
             display: flex;
             gap: 12px;
+            position: sticky;
+            bottom: -24px;
+            padding: 16px 0 4px;
+            margin: 0 -24px -24px;
+            padding-left: 24px;
+            padding-right: 24px;
+            background: linear-gradient(to top, var(--surface) 70%, transparent);
+            z-index: 10;
         }
 
         .progress-section {
