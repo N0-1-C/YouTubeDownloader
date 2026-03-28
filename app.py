@@ -67,7 +67,7 @@ _NODE_EXTRA_PATHS = [
 NODE_PATH = _find_executable('node', _NODE_EXTRA_PATHS)
 
 # 下载目录
-DOWNLOAD_DIR = r'C:\Users\pc\Downloads'
+DOWNLOAD_DIR = os.path.join(os.path.expanduser('~'), 'Desktop')
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 # 将外部工具目录加入 PATH（让子进程能找到）
@@ -619,6 +619,13 @@ def auto_open_setting():
     return jsonify({'success': True, 'auto_open': AUTO_OPEN_FOLDER, 'message': f'已{"开启" if AUTO_OPEN_FOLDER else "关闭"}自动打开文件夹'})
 
 
+@app.route('/api/shutdown', methods=['POST'])
+def shutdown():
+    """关闭服务器"""
+    threading.Thread(target=shutdown_server, daemon=True).start()
+    return jsonify({'success': True, 'message': '服务正在关闭...'})
+
+
 
 
 
@@ -701,6 +708,27 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         .header p {
             color: var(--text2);
             font-size: 0.9rem;
+        }
+
+        .shutdown-btn {
+            position: fixed;
+            top: 16px;
+            right: 16px;
+            padding: 6px 16px;
+            font-size: 0.8rem;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            background: var(--surface2);
+            color: var(--text2);
+            cursor: pointer;
+            transition: all 0.2s;
+            z-index: 100;
+        }
+
+        .shutdown-btn:hover {
+            background: rgba(255, 68, 68, 0.15);
+            border-color: var(--accent);
+            color: var(--accent);
         }
 
         .input-section {
@@ -1287,6 +1315,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
     </style>
 </head>
 <body>
+    <button class="shutdown-btn" id="shutdownBtn" onclick="shutdownServer()">✕ 关闭服务</button>
     <div class="container">
         <div class="header">
             <h1>▶ YouTube 视频下载器</h1>
@@ -1720,6 +1749,20 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             return bytes + ' B';
         }
 
+        function shutdownServer() {
+            if (!confirm('确定要关闭服务吗？关闭后需要重新启动程序才能继续使用。')) return;
+            const btn = document.getElementById('shutdownBtn');
+            btn.textContent = '正在关闭...';
+            btn.disabled = true;
+            fetch('/api/shutdown', { method: 'POST' })
+                .then(() => {
+                    document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;color:#666;font-family:sans-serif;font-size:1.2rem;">服务已关闭，可以关闭此页面。</div>';
+                })
+                .catch(() => {
+                    document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;color:#666;font-family:sans-serif;font-size:1.2rem;">服务已关闭，可以关闭此页面。</div>';
+                });
+        }
+
         function formatDuration(seconds) {
             if (!seconds) return '未知';
             const m = Math.floor(seconds / 60);
@@ -1748,6 +1791,12 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
     </script>
 </body>
 </html>'''
+
+
+def shutdown_server():
+    """关闭 Flask 服务器"""
+    import os
+    os._exit(0)
 
 
 if __name__ == '__main__':

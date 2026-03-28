@@ -1,4 +1,4 @@
-# 忽略构建产物和临时文件（快照只跟踪源码）
+# 构建产物和临时文件
 dist/
 build/
 __pycache__/
@@ -9,3 +9,11 @@ __pycache__/
 downloads/
 cookies.txt
 *.egg-info/
+
+# Node.js（仅用于生成文档时的临时依赖）
+node_modules/
+package.json
+package-lock.json/
+
+# ZIP 发行包（太大，不上传）
+YouTubeDownloader.zip
