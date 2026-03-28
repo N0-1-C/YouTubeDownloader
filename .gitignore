@@ -1,0 +1,11 @@
+# 忽略构建产物和临时文件（快照只跟踪源码）
+dist/
+build/
+__pycache__/
+*.pyc
+*.spec
+.venv/
+.workbuddy/
+downloads/
+cookies.txt
+*.egg-info/
