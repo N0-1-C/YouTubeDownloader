@@ -342,6 +342,44 @@ def test_api_shutdown():
              "跳过 — 实际调用会关闭服务。手动测试: curl -X POST http://127.0.0.1:5000/api/shutdown")
 
 
+def test_api_pause_resume_cancel():
+    """暂停/恢复/取消测试"""
+    log_section("POST /api/task/<id>/pause|resume|cancel — 暂停/恢复/取消")
+    global passed, failed
+
+    # 测试 1: 暂停不存在的任务
+    r = requests.post(f"{BASE_URL}/api/task/nonexistent/pause")
+    ok = r.status_code == 404 and not r.json().get("success")
+    log_test("暂停不存在的任务应返回 404", ok, f"HTTP {r.status_code}")
+    if ok:
+        passed += 1
+    else:
+        failed += 1
+
+    # 测试 2: 恢复不存在的任务
+    r = requests.post(f"{BASE_URL}/api/task/nonexistent/resume")
+    ok = r.status_code == 404 and not r.json().get("success")
+    log_test("恢复不存在的任务应返回 404", ok, f"HTTP {r.status_code}")
+    if ok:
+        passed += 1
+    else:
+        failed += 1
+
+    # 测试 3: 取消不存在的任务
+    r = requests.post(f"{BASE_URL}/api/task/nonexistent/cancel")
+    ok = r.status_code == 404 and not r.json().get("success")
+    log_test("取消不存在的任务应返回 404", ok, f"HTTP {r.status_code}")
+    if ok:
+        passed += 1
+    else:
+        failed += 1
+
+    # 测试 4: 对不存在任务进度查询应返回 paused/cancelled 状态
+    # （通过 /api/progress 验证 status 字段包含新状态值）
+    log_test("暂停/恢复/取消完整流程", None,
+             "跳过 — 需要实际下载任务才能测试。手动测试流程: 下载 → 暂停 → 恢复 → 取消")
+
+
 # ============================================================
 # 主测试流程
 # ============================================================
@@ -361,6 +399,7 @@ def main():
     test_api_cookies()
     test_api_auto_open()
     test_api_shutdown()
+    test_api_pause_resume_cancel()
 
     # 汇总
     print(f"\n{'=' * 50}")

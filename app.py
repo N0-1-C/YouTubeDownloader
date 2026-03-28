@@ -156,6 +156,15 @@ class DownloadProgressHook:
         if self.task_id not in tasks:
             return
         task = tasks[self.task_id]
+
+        # 检查是否被取消
+        if task.get('cancelled'):
+            raise yt_dlp.utils.DownloadCancelled('用户取消了下载')
+
+        # 检查是否被暂停
+        if task.get('paused'):
+            raise yt_dlp.utils.DownloadCancelled('用户暂停了下载')
+
         now = datetime.now().timestamp()
 
         # 限制更新频率，避免过于频繁
@@ -313,8 +322,14 @@ def get_format_options(url):
 def download_video(task_id, url, format_id, is_audio, save_dir):
     """在后台线程中下载视频"""
     task = tasks[task_id]
-    task['status'] = 'fetching'
-    task['message'] = '正在获取视频信息...'
+
+    # 检查是否从暂停恢复
+    if task.get('resuming'):
+        task['resuming'] = False
+        task['paused'] = False
+    else:
+        task['status'] = 'fetching'
+        task['message'] = '正在获取视频信息...'
 
     try:
         ydl_opts = {
@@ -322,7 +337,7 @@ def download_video(task_id, url, format_id, is_audio, save_dir):
             'outtmpl': os.path.join(save_dir, '%(title)s.%(ext)s'),
             'restrictfilenames': True,
             'max_filename_length': 200,
-            'nooverwrites': True,
+            'nooverwrites': False,
             # 代理设置（自动检测）
             'proxy': PROXY_URL or '',
             # SSL 相关
@@ -390,6 +405,10 @@ def download_video(task_id, url, format_id, is_audio, save_dir):
             task['message'] = '下载完成！'
             task['filename'] = filename
             task['display_name'] = os.path.basename(filename)
+            # 清除暂停恢复相关的状态
+            task.pop('paused', None)
+            task.pop('resuming', None)
+            task.pop('cancelled', None)
 
             # 下载完成后自动打开文件夹
             if AUTO_OPEN_FOLDER and os.path.isdir(save_dir):
@@ -398,10 +417,26 @@ def download_video(task_id, url, format_id, is_audio, save_dir):
                 except Exception:
                     pass
 
+    except yt_dlp.utils.DownloadCancelled:
+        if task.get('paused'):
+            task['status'] = 'paused'
+            task['message'] = '下载已暂停，点击继续恢复下载'
+            # 保留当前进度、url、格式信息以便恢复
+        elif task.get('cancelled'):
+            task['status'] = 'cancelled'
+            task['message'] = '下载已取消'
+            task['progress'] = 0
+            task.pop('paused', None)
+            task.pop('resuming', None)
     except Exception as e:
-        task['status'] = 'error'
-        task['message'] = f'下载失败: {str(e)}'
-        task['progress'] = 0
+        if task.get('cancelled'):
+            task['status'] = 'cancelled'
+            task['message'] = '下载已取消'
+            task['progress'] = 0
+        else:
+            task['status'] = 'error'
+            task['message'] = f'下载失败: {str(e)}'
+            task['progress'] = 0
 
 
 # ============ 路由 ============
@@ -471,6 +506,10 @@ def start_download():
         'speed': 0,
         'eta': 0,
         'created_at': datetime.now().isoformat(),
+        'paused': False,
+        'cancelled': False,
+        'is_audio': is_audio,
+        'save_dir': save_dir,
     }
 
     thread = threading.Thread(
@@ -624,6 +663,69 @@ def shutdown():
     """关闭服务器"""
     threading.Thread(target=shutdown_server, daemon=True).start()
     return jsonify({'success': True, 'message': '服务正在关闭...'})
+
+
+@app.route('/api/task/<task_id>/pause', methods=['POST'])
+def pause_task(task_id):
+    """暂停下载任务"""
+    if task_id not in tasks:
+        return jsonify({'success': False, 'message': '任务不存在'}), 404
+
+    task = tasks[task_id]
+    if task['status'] not in ('downloading', 'fetching'):
+        return jsonify({'success': False, 'message': f'当前状态无法暂停: {task["status"]}'}), 400
+
+    task['paused'] = True
+    return jsonify({'success': True, 'message': '正在暂停...'})
+
+
+@app.route('/api/task/<task_id>/resume', methods=['POST'])
+def resume_task(task_id):
+    """恢复暂停的下载任务"""
+    if task_id not in tasks:
+        return jsonify({'success': False, 'message': '任务不存在'}), 404
+
+    task = tasks[task_id]
+    if task['status'] != 'paused':
+        return jsonify({'success': False, 'message': f'当前状态无法恢复: {task["status"]}'}), 400
+
+    # 标记为恢复状态，重新启动下载线程
+    task['paused'] = False
+    task['cancelled'] = False
+    task['resuming'] = True
+
+    thread = threading.Thread(
+        target=download_video,
+        args=(task_id, task['url'], task['format_id'], task.get('is_audio', False), task.get('save_dir', DOWNLOAD_DIR)),
+        daemon=True
+    )
+    thread.start()
+
+    return jsonify({'success': True, 'message': '正在恢复下载...'})
+
+
+@app.route('/api/task/<task_id>/cancel', methods=['POST'])
+def cancel_task(task_id):
+    """取消下载任务"""
+    if task_id not in tasks:
+        return jsonify({'success': False, 'message': '任务不存在'}), 404
+
+    task = tasks[task_id]
+    if task['status'] in ('completed', 'cancelled', 'error'):
+        return jsonify({'success': False, 'message': f'当前状态无法取消: {task["status"]}'}), 400
+
+    # 对于已暂停的任务直接标记取消
+    if task['status'] == 'paused':
+        task['status'] = 'cancelled'
+        task['message'] = '下载已取消'
+        task['progress'] = 0
+        task.pop('paused', None)
+        task.pop('resuming', None)
+        return jsonify({'success': True, 'message': '下载已取消'})
+
+    # 正在下载的任务设置取消标志
+    task['cancelled'] = True
+    return jsonify({'success': True, 'message': '正在取消...'})
 
 
 
@@ -1240,6 +1342,81 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             font-size: 0.85rem;
         }
 
+        .progress-actions {
+            display: flex;
+            gap: 10px;
+            margin-top: 14px;
+        }
+
+        .btn-pause, .btn-cancel {
+            padding: 8px 20px;
+            border: none;
+            border-radius: 10px;
+            font-size: 0.9rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .btn-pause {
+            background: rgba(255, 152, 0, 0.15);
+            color: #ff9800;
+            border: 1px solid rgba(255, 152, 0, 0.3);
+        }
+
+        .btn-pause:hover {
+            background: rgba(255, 152, 0, 0.25);
+        }
+
+        .btn-pause:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+
+        .btn-cancel {
+            background: rgba(255, 68, 68, 0.1);
+            color: var(--text2);
+            border: 1px solid var(--border);
+        }
+
+        .btn-cancel:hover {
+            background: rgba(255, 68, 68, 0.2);
+            color: var(--accent);
+            border-color: var(--accent);
+        }
+
+        .btn-cancel:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+
+        .btn-resume {
+            background: rgba(76, 175, 80, 0.15);
+            color: #4caf50;
+            border: 1px solid rgba(76, 175, 80, 0.3);
+            padding: 8px 20px;
+            border-radius: 10px;
+            font-size: 0.9rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .btn-resume:hover {
+            background: rgba(76, 175, 80, 0.25);
+        }
+
+        .paused-badge {
+            display: inline-block;
+            padding: 2px 8px;
+            background: rgba(255, 152, 0, 0.15);
+            color: #ff9800;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            margin-left: 8px;
+        }
+
         .error-msg {
             color: var(--accent);
             padding: 16px;
@@ -1428,6 +1605,10 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             <div class="progress-details">
                 <span id="progressSpeed"></span>
                 <span id="progressEta"></span>
+            </div>
+            <div class="progress-actions" id="progressActions">
+                <button class="btn-pause" id="pauseBtn" onclick="pauseTask()">⏸ 暂停</button>
+                <button class="btn-cancel" id="cancelBtn" onclick="cancelTask()">✕ 取消</button>
             </div>
         </div>
 
@@ -1668,6 +1849,8 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
 
         function showProgress() {
             document.getElementById('progressSection').classList.add('show');
+            document.getElementById('progressActions').style.display = 'flex';
+            document.getElementById('progressBar').style.background = '';
         }
 
         function pollProgress() {
@@ -1691,6 +1874,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                         }
                         loadHistory();
                     }
+                    // paused 和 cancelled 不停止轮询，等待用户操作
                 } catch (e) {}
             }, 500);
         }
@@ -1703,13 +1887,56 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                 'finished': '下载完成',
                 'completed': '完成',
                 'error': '出错',
+                'paused': '已暂停',
+                'cancelled': '已取消',
             };
 
-            document.getElementById('progressStatus').textContent = statusMap[data.status] || data.message || '处理中...';
+            const statusEl = document.getElementById('progressStatus');
+            statusEl.innerHTML = statusMap[data.status] || data.message || '处理中...';
+
+            // 暂停标识
+            const existingBadge = statusEl.querySelector('.paused-badge');
+            if (data.status === 'paused' && !existingBadge) {
+                statusEl.innerHTML += '<span class="paused-badge">PAUSED</span>';
+            }
+
             document.getElementById('progressPercent').textContent = Math.round(data.progress) + '%';
             document.getElementById('progressBar').style.width = data.progress + '%';
             document.getElementById('progressSpeed').textContent = data.speed ? formatFileSize(data.speed) + '/s' : '';
             document.getElementById('progressEta').textContent = data.eta ? '剩余 ' + formatEta(data.eta) : '';
+
+            // 更新按钮状态
+            const pauseBtn = document.getElementById('pauseBtn');
+            const cancelBtn = document.getElementById('cancelBtn');
+            const actionsDiv = document.getElementById('progressActions');
+
+            if (data.status === 'paused') {
+                // 暂停状态：显示恢复按钮
+                pauseBtn.textContent = '▶ 继续';
+                pauseBtn.className = 'btn-resume';
+                pauseBtn.onclick = resumeTask;
+                pauseBtn.disabled = false;
+                cancelBtn.disabled = false;
+                // 进度条颜色变为橙色
+                document.getElementById('progressBar').style.background = '#ff9800';
+            } else if (data.status === 'downloading' || data.status === 'fetching') {
+                // 下载中：显示暂停按钮
+                pauseBtn.textContent = '⏸ 暂停';
+                pauseBtn.className = 'btn-pause';
+                pauseBtn.onclick = pauseTask;
+                pauseBtn.disabled = (data.status === 'fetching');
+                cancelBtn.disabled = false;
+                document.getElementById('progressBar').style.background = '';
+            } else if (data.status === 'processing') {
+                // 处理中：禁用暂停，保留取消
+                pauseBtn.disabled = true;
+                cancelBtn.disabled = true;
+            } else {
+                // 其他状态（completed、error、cancelled）：隐藏按钮
+                actionsDiv.style.display = 'none';
+                return;
+            }
+            actionsDiv.style.display = 'flex';
         }
 
         function showSuccess(taskId, filename) {
@@ -1717,6 +1944,39 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             document.getElementById('successSection').classList.add('show');
             document.getElementById('successFilename').textContent = filename || '下载完成';
             document.getElementById('downloadLink').href = `/api/file/${taskId}`;
+        }
+
+        async function pauseTask() {
+            if (!currentTaskId) return;
+            try {
+                await fetch(`/api/task/${currentTaskId}/pause`, { method: 'POST' });
+            } catch (e) {}
+        }
+
+        async function resumeTask() {
+            if (!currentTaskId) return;
+            try {
+                await fetch(`/api/task/${currentTaskId}/resume`, { method: 'POST' });
+                // 恢复后确保轮询继续
+                if (!progressInterval) pollProgress();
+            } catch (e) {}
+        }
+
+        async function cancelTask() {
+            if (!currentTaskId) return;
+            if (!confirm('确定要取消下载吗？')) return;
+            try {
+                const res = await fetch(`/api/task/${currentTaskId}/cancel`, { method: 'POST' });
+                const data = await res.json();
+                if (data.success) {
+                    clearInterval(progressInterval);
+                    progressInterval = null;
+                    document.getElementById('progressSection').classList.remove('show');
+                    currentTaskId = null;
+                    document.getElementById('videoInfo').style.display = '';
+                    loadHistory();
+                }
+            } catch (e) {}
         }
 
         async function loadHistory() {
@@ -1731,10 +1991,15 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                 const list = document.getElementById('historyList');
                 list.innerHTML = '';
                 data.tasks.forEach(t => {
-                    const status = t.status === 'completed' ? 'completed' : 
-                                   t.status === 'error' ? 'error' : 'downloading';
+                    const statusClass = t.status === 'completed' ? 'completed' :
+                                        t.status === 'error' ? 'error' :
+                                        t.status === 'cancelled' ? 'error' :
+                                        t.status === 'paused' ? 'downloading' :
+                                        'downloading';
                     const statusText = t.status === 'completed' ? '完成' : 
-                                       t.status === 'error' ? '失败' : t.status;
+                                       t.status === 'error' ? '失败' :
+                                       t.status === 'cancelled' ? '已取消' :
+                                       t.status === 'paused' ? '已暂停' : t.status;
                     const time = t.created_at ? new Date(t.created_at).toLocaleString('zh-CN') : '';
 
                     let action = '';
@@ -1744,7 +2009,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
 
                     list.innerHTML += `
                         <div class="history-item">
-                            <div class="history-status ${status}"></div>
+                            <div class="history-status ${statusClass}"></div>
                             <div class="history-info">
                                 <div class="history-name">${t.display_name || statusText}</div>
                                 <div class="history-time">${time}  |  ${statusText}</div>
